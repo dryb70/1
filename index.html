@@ -4,19 +4,32 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#000000">
-<title>to 张姐 🎄</title>
+<title>to zxy 🎄</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400;1,600&family=Cinzel:wght@400;500&display=swap" rel="stylesheet">
+<!-- 国内网络打不开 Google Fonts 时的镜像（同一套字体，加载失败也不影响） -->
+<link href="https://fonts.loli.net/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400;1,600&family=Cinzel:wght@400;500&display=swap" rel="stylesheet">
 <style>
   html,body{margin:0;height:100%;background:#000;overflow:hidden}
   canvas{display:block;width:100vw;height:100vh;touch-action:none}
   .veil{position:fixed;inset:0;pointer-events:none;
         background:radial-gradient(circle at 50% 52%, rgba(0,0,0,0) 36%, rgba(0,0,0,.26) 72%, rgba(0,0,0,.55) 100%)}
-  .txt{position:fixed;left:7vw;top:31%;pointer-events:none;
-       font-family:"STXingkai","华文行楷","STKaiti","KaiTi","楷体","Songti SC",Georgia,serif;
-       text-shadow:0 0 26px rgba(255,214,102,.55),0 0 66px rgba(70,255,140,.30),0 0 4px rgba(255,255,255,.4)}
-  .txt h1{margin:0;font-weight:400;font-size:clamp(36px,5vw,76px);line-height:1.12;
-          color:#fff5c8;letter-spacing:.03em}
-  .txt p{margin:.55em 0 0;font-size:clamp(12px,1.42vw,21px);letter-spacing:.26em;color:#bdffd2;
-         opacity:.78;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+  .txt{position:fixed;left:7vw;top:30%;pointer-events:none;
+       font-family:"Cormorant Garamond","Playfair Display","Didot","Times New Roman",Georgia,serif;
+       filter:drop-shadow(0 0 16px rgba(255,214,102,.42)) drop-shadow(0 0 46px rgba(255,196,70,.20))}
+  .txt h1{margin:0;font-weight:400;font-style:italic;
+          font-size:clamp(58px,7.4vw,118px);line-height:1.16;letter-spacing:.005em;
+          /* padding 必须有：金色渐变只画在背景框内，斜体 y 的尾巴超出框就会被裁成 v */
+          padding:.06em .06em .30em;
+          color:#f4d06a;                                     /* 不支持渐变字时的兜底色 */
+          background:linear-gradient(178deg,#fffdf2 0%,#fff6d2 28%,#f7d878 56%,#e0b64a 80%,#c99a33 100%);
+          -webkit-background-clip:text;background-clip:text;
+          -webkit-text-fill-color:transparent}
+  .txt h1 i{font-style:italic;font-weight:300;font-size:.44em;letter-spacing:.06em;
+            opacity:.92;margin-right:.1em;vertical-align:.16em}
+  .txt p{margin:.7em 0 0;font-family:"Cinzel",Georgia,serif;font-size:clamp(11px,1.16vw,17px);
+         letter-spacing:.44em;color:#cfe9d8;opacity:.72;text-shadow:0 0 18px rgba(70,255,140,.22)}
   .hint{position:fixed;left:7vw;bottom:7vh;pointer-events:none;color:#eaffd8;opacity:0;
         font:400 13px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:.12em;
         animation:hint 7s ease-in-out forwards}
@@ -44,7 +57,7 @@
 <body>
 <canvas id="c"></canvas>
 <div class="veil"></div>
-<div class="txt"><h1>to 张姐</h1><p>MERRY CHRISTMAS</p></div>
+<div class="txt"><h1><i>to</i> zxy</h1><p>MERRY CHRISTMAS</p></div>
 <div class="hint">拖动旋转 · 双击撒花</div>
 <div class="ui" id="ui">
   <button class="btn" id="camBtn">启用摄像头手势</button>
