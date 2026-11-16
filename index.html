@@ -22,6 +22,23 @@
         animation:hint 7s ease-in-out forwards}
   @keyframes hint{10%{opacity:.42}70%{opacity:.42}100%{opacity:0}}
   @media (max-width:560px){.txt{top:23%}.hint{bottom:5vh}}
+
+  /* 手势控制面板 */
+  .ui{position:fixed;left:0;right:0;bottom:0;padding:0 7vw 20px;display:flex;align-items:center;
+      gap:16px;flex-wrap:wrap;transition:opacity .45s ease;z-index:5}
+  .ui-hidden{opacity:0;pointer-events:none}
+  .btn{background:rgba(255,255,255,.055);border:1px solid rgba(212,175,55,.5);color:#fceea7;
+       padding:10px 20px;border-radius:999px;font:500 12px/1 system-ui,-apple-system,"Segoe UI",sans-serif;
+       letter-spacing:.16em;cursor:pointer;backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px);
+       transition:background .25s,border-color .25s,color .25s}
+  .btn:hover{background:rgba(212,175,55,.16);border-color:#d4af37}
+  .btn:active{transform:translateY(1px)}
+  .stat{color:#a8c0ae;font:400 11px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:.1em}
+  .keys{color:#68796d;font:400 11px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:.08em}
+  .keys b{color:#c9b06a;font-weight:500}
+  #camwrap{position:fixed;right:0;bottom:0;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none}
+  #cam{width:160px;height:120px}
+  @media (max-width:560px){.ui{padding:0 6vw 16px;gap:10px}.keys{display:none}}
 </style>
 </head>
 <body>
@@ -29,6 +46,12 @@
 <div class="veil"></div>
 <div class="txt"><h1>to 张姐</h1><p>MERRY CHRISTMAS</p></div>
 <div class="hint">拖动旋转 · 双击撒花</div>
+<div class="ui" id="ui">
+  <button class="btn" id="camBtn">启用摄像头手势</button>
+  <div class="stat" id="stat">手势：未启用</div>
+  <div class="keys"><b>握拳</b> 圣诞树 · <b>张开</b> 散落 · <b>捏合</b> 聚焦 · 手左右上下转会带着树转 · 也可按 <b>1 2 3</b> · <b>H</b> 隐藏控件</div>
+</div>
+<div id="camwrap"><video id="cam" playsinline muted></video><canvas id="mcv" width="160" height="120"></canvas></div>
 <script>
 (function () {
 'use strict';
@@ -61,6 +84,21 @@ var ORB_N = small ? 9 : 16;
 var orbA = new Float32Array(ORB_N), orbS = new Float32Array(ORB_N),
     orbR = new Float32Array(ORB_N), orbP = new Float32Array(ORB_N);
 
+// ── 手势状态机（MediaPipe Hands）──────────────────────────────
+var GS = {
+  ready: false,        // 模型 + 摄像头是否就绪
+  active: false,       // 当前是否看见手
+  lastSeen: -99,       // 上次看见手的时间
+  mode: 'TREE',        // TREE | SCATTER | FOCUS
+  gesture: 'none',
+  tx: 0.5, ty: 0.5,    // 手掌中心（Landmark 9）的归一化坐标
+  base: 0, baseSet: false
+};
+var morph = 0;         // 0 = 圣诞树，1 = 散落
+var focus = 0;         // 聚焦推近系数
+var pitchExtra = 0;
+var TX = null, TY = null, TZ = null;   // 散落形态的目标位置
+
 function rand(a, b) { return a + Math.random() * (b - a); }
 function randInt(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
 function clamp255(v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
@@ -74,7 +112,14 @@ function gauss(mu, sd) {
 function build() {
   var X = [], Y = [], Z = [], R = [], G = [], B = [], P = [], K = [], F = [], L = [];
   var glowLeft = small ? 700 : 1800;
-  var i, u, h, y, baseR, wave, t, ang, r, gm;
+  var i, u, h, y, baseR, wave, t, ang, r, gm, gt;
+  // 树顶金色化程度：0.34 以下是纯绿，往上快速变成金黄色
+  function goldMix(hh) {
+    var k = (hh - 0.34) / 0.34;
+    if (k < 0) k = 0; else if (k > 1) k = 1;
+    k = k * k * (3 - 2 * k);             // 平滑过渡
+    return Math.pow(k, 0.62);            // 提前转金，让树顶整段都是金黄色
+  }
 
   function add(x, y, z, rr, gg, bb, f, wantGlow) {
     X.push(x); Y.push(y); Z.push(z);
@@ -98,11 +143,17 @@ function build() {
     ang = t + ((i & 1) ? Math.PI : 0) + rand(-0.16, 0.16);
     r = baseR * rand(0.86, 1.07);
     var sx0 = Math.cos(ang) * r, sz0 = Math.sin(ang) * r;
-    if (Math.random() < 0.15) {
+    gt = goldMix(h);
+    if (Math.random() < 0.15 + 0.55 * gt) {          // 越靠近树顶，金色灯泡越多
       add(sx0, y, sz0, 255, randInt(198, 238), randInt(64, 116), randInt(124, 156), true);
     } else {
       gm = Math.min(255, 176 + Math.floor(66 * (1 - Math.abs(h - 0.55) * 1.3)));
-      add(sx0, y, sz0, randInt(18, 78), gm, randInt(48, 112), randInt(95, 128), false);
+      // 绿 → 金 渐变（顶部为金色/黄色）
+      add(sx0, y, sz0,
+          clamp255((randInt(18, 78) * (1 - gt)) + 255 * gt),
+          clamp255(gm * (1 - gt) + 206 * gt),
+          clamp255((randInt(48, 112) * (1 - gt)) + 62 * gt),
+          randInt(95, 128), gt > 0.32);
     }
   }
 
@@ -116,11 +167,15 @@ function build() {
     r = baseR * Math.sqrt(Math.random());
     ang = Math.random() * TAU;
     var depth = r / (baseR < 0.01 ? 0.01 : baseR);
-    if (Math.random() < 0.05 || (depth > 0.84 && Math.random() < 0.30)) {
+    gt = goldMix(h);
+    if (Math.random() < 0.05 + 0.5 * gt || (depth > 0.84 && Math.random() < 0.30)) {
       add(Math.cos(ang) * r, y, Math.sin(ang) * r, 255, randInt(204, 242), randInt(68, 132), 108, Math.random() < 0.2);
     } else {
+      var fr = randInt(3, 40), fg = clamp255(Math.floor(92 + 130 * depth)), fb = clamp255(Math.floor(24 + 60 * depth));
       add(Math.cos(ang) * r + rand(-0.09, 0.09), y, Math.sin(ang) * r + rand(-0.09, 0.09),
-          randInt(3, 40), clamp255(Math.floor(92 + 130 * depth)), clamp255(Math.floor(24 + 60 * depth)),
+          clamp255(fr * (1 - gt) + 255 * gt),
+          clamp255(fg * (1 - gt) + 202 * gt),
+          clamp255(fb * (1 - gt) + 58 * gt),
           randInt(84, 110), false);
     }
   }
@@ -148,7 +203,7 @@ function build() {
     }
   }
 
-  // 树顶 3D 爱心（粉色，始终面向镜头）
+  // 树顶 3D 爱心（金黄色，始终面向镜头）
   var hx, hy, f, topY = TREE_H + 0.05, dist, fq;
   heartStart = X.length;
   for (i = 0; i < HEART_N; i++) {
@@ -159,10 +214,10 @@ function build() {
     dist = Math.hypot(hx, hy);
     fq = Math.max(0.35, 1.15 - 0.5 * dist);
     add(hx * 1.02, topY + (hy + 1) * 0.6, rand(-0.34, 0.34),
-        255, clamp255(120 * fq + 72), clamp255(200 * fq + 62), randInt(108, 136), Math.random() < 0.012);
+        255, clamp255(112 * fq + 148), clamp255(96 * fq + 18), randInt(108, 136), Math.random() < 0.012);
   }
 
-  // 爱心周围的粉色星环 + 光尘
+  // 爱心周围的金色星环 + 光尘
   var HR_N = small ? 430 : 1000, ha, hr, hxx, hyy, hzz, pick;
   for (i = 0; i < HR_N; i++) {
     ha = Math.random() * TAU;
@@ -172,12 +227,12 @@ function build() {
     hyy = topY + 0.62 + Math.sin(ha) * hr * 0.62 + rand(-0.14, 0.14);
     hzz = gauss(0, 0.14);
     pick = Math.random();
-    if (pick < 0.10) {                                                   // 少量金星点缀
-      add(hxx, hyy, hzz, 255, randInt(200, 240), randInt(96, 152), randInt(84, 106), Math.random() < 0.05);
-    } else if (pick < 0.46) {                                            // 白
-      add(hxx, hyy, hzz, 255, randInt(226, 252), randInt(238, 255), randInt(80, 102), Math.random() < 0.03);
-    } else {                                                             // 粉
-      add(hxx, hyy, hzz, 255, randInt(146, 200), randInt(188, 232), randInt(82, 108), Math.random() < 0.045);
+    if (pick < 0.10) {                                                   // 少量亮金点缀
+      add(hxx, hyy, hzz, 255, randInt(206, 244), randInt(90, 150), randInt(84, 106), Math.random() < 0.05);
+    } else if (pick < 0.46) {                                            // 暖白
+      add(hxx, hyy, hzz, 255, randInt(236, 255), randInt(206, 236), randInt(80, 102), Math.random() < 0.03);
+    } else {                                                             // 金
+      add(hxx, hyy, hzz, 255, randInt(186, 226), randInt(70, 132), randInt(82, 108), Math.random() < 0.045);
     }
   }
 
@@ -225,6 +280,17 @@ function build() {
   xs = Float32Array.from(X); ys = Float32Array.from(Y); zs = Float32Array.from(Z);
   cr = Uint8Array.from(R); cg = Uint8Array.from(G); cb = Uint8Array.from(B);
   ph = Uint8Array.from(P); twk = Uint8Array.from(K); fac = Uint8Array.from(F); gl = Uint8Array.from(L);
+
+  // 散落形态：每个粒子的目标位置（球壳内随机分布）
+  TX = new Float32Array(N); TY = new Float32Array(N); TZ = new Float32Array(N);
+  for (i = 0; i < N; i++) {
+    var rr = 6 + Math.random() * 9.5;
+    var th = Math.random() * TAU;
+    var cph = rand(-1, 1), sph = Math.sqrt(1 - cph * cph);
+    TX[i] = sph * Math.cos(th) * rr;
+    TY[i] = 4.4 + cph * rr * 0.66;
+    TZ[i] = sph * Math.sin(th) * rr;
+  }
 }
 
 // 闪烁查表：256 项，避免逐粒子三角函数
@@ -338,23 +404,52 @@ function frame(now) {
   var bf = buf, ww = W, hh = H, NN = N;
   var X = xs, Y = ys, Z = zs, CR = cr, CG = cg, CB = cb, PH = ph, TWK = twk, FAC = fac, GL = gl;
   var wi0 = wingStart, hi0 = heartStart, hi1 = heartEnd;
+  var TXa = TX, TYa = TY, TZa = TZ;
   var ta = TW_A, tb = TW_B;
 
   var dt = last ? Math.min(0.05, (now - last) / 1000) : 0.016;
   last = now;
   T += dt;
-  angle += 0.26 * dt;
   updateTwinkle(T);
 
+  // 手势控制：看到手的时候，手的左右/上下带着树转；没手时自动缓慢自转
+  var handOn = GS.active && (T - GS.lastSeen) < 0.6;
+  if (handOn) {
+    if (!GS.baseSet) { GS.base = angle - (GS.tx - 0.5) * 2.6; GS.baseSet = true; }
+    var tgtA = GS.base + (GS.tx - 0.5) * 2.6;
+    angle += (tgtA - angle) * Math.min(1, dt * 4.0);
+    pitchExtra += (((0.5 - GS.ty) * 0.7) - pitchExtra) * Math.min(1, dt * 3.0);
+  } else {
+    GS.baseSet = false;
+    angle += 0.26 * dt;
+    pitchExtra += (0 - pitchExtra) * Math.min(1, dt * 2.0);
+  }
+
+  // 形态过渡：TREE → SCATTER(散落) / FOCUS(推近聚焦爱心)
+  var wantMorph = GS.mode === 'SCATTER' ? 1 : 0;
+  morph += (wantMorph - morph) * Math.min(1, dt * 3.0);
+  var wantFocus = GS.mode === 'FOCUS' ? 1 : 0;
+  focus += (wantFocus - focus) * Math.min(1, dt * 2.4);
+  var setAngle = T * 0.22 * morph;                       // 散落时整团缓慢自旋
+  var setC = Math.cos(setAngle), setS = Math.sin(setAngle);
+
   var ca = Math.cos(angle), sa = Math.sin(angle);
-  var pitch = PITCH + Math.sin(T * 0.45) * 0.028;
+  var pitch = PITCH + Math.sin(T * 0.45) * 0.028 + pitchExtra;
   var cp = Math.cos(pitch), sp = Math.sin(pitch);
   var aspect = ww / hh;
   var fit = aspect < 1.05 ? 1 + (1.05 - aspect) * 0.52 : 1;   // 竖屏拉远，避免出框
-  var camD = CAM_DIST * fit;
+  var camD = CAM_DIST * fit / (1 + focus * 0.55);             // 聚焦时推近
   var F0 = hh * 0.63;
   var ox = ww * 0.5, oy = hh * 0.5;
-  var i, x, y, z, xz, zz, yp, zp, sx, sy, size, bx, by, xe, ye, px, py, row, id2, p2;
+  // 聚焦时把树顶爱心平移到画面中心
+  var shift = 0;
+  if (focus > 0.002) {
+    var hyc2 = TREE_H + 0.67;
+    var ypc2 = hyc2 * cp - CAM_HEIGHT;
+    var zpc2 = hyc2 * sp + camD;
+    if (zpc2 > 0.4) shift = focus * ((oy - ypc2 * (F0 / zpc2)) - oy);
+  }
+  var i, x, y, z, xz, zz, yp, zp, sx, sy, size, bx, by, xe, ye, px, py, row, id2, p2, mx;
   var nr, ng2, nb, ci, cj, ck, k2, tw, f2, sz2;
 
   bf.fill(0xff000000);
@@ -365,7 +460,16 @@ function frame(now) {
 
   // 1. 主体粒子：最大混合 + 闪烁；金色灯泡额外柔光
   for (i = 0; i < NN; i++) {
-    x = X[i]; y = Y[i]; z = Z[i];
+    if (morph > 0.002) {                             // 向散落形态插值
+      x = X[i] + (TXa[i] - X[i]) * morph;
+      y = Y[i] + (TYa[i] - Y[i]) * morph;
+      z = Z[i] + (TZa[i] - Z[i]) * morph;
+      mx = x * setC - z * setS;
+      z = x * setS + z * setC;
+      x = mx;
+    } else {
+      x = X[i]; y = Y[i]; z = Z[i];
+    }
     if (i >= wi0 || (i >= hi0 && i < hi1)) {   // 光帘 + 爱心：固定在相机平面
       xz = x; zz = z;
     } else {
@@ -377,7 +481,7 @@ function frame(now) {
     if (zp < 0.1) continue;
     k2 = F0 / zp;
     sx = (ox + xz * k2) | 0;
-    sy = (oy - yp * k2) | 0;
+    sy = ((oy - yp * k2) - shift) | 0;
     if (sx < 0 || sx >= ww || sy < 0 || sy >= hh) continue;
 
     tw = TWK[i] ? tb[PH[i]] : ta[PH[i]];
@@ -416,9 +520,9 @@ function frame(now) {
   if (zp2 > 0.2) {
     var k3 = F0 / zp2;
     var k4c = F0 / (hyc * sp + camD > 0.2 ? hyc * sp + camD : 0.2);
-    var pyc = oy - (hyc * cp - CAM_HEIGHT) * k4c;
-    addSoftDot(ox, pyc, 3.8 * k4c, 255, 118, 186, 0.07 + 0.04 * Math.sin(T * 1.4), bf, ww, hh);
-    addSoftDot(ox, oy - yp2 * k3, 2.2 * k3, 255, 150, 208, 0.16 + 0.10 * Math.sin(T * 1.9), bf, ww, hh);
+    var pyc = oy - (hyc * cp - CAM_HEIGHT) * k4c - shift;
+    addSoftDot(ox, pyc, 3.8 * k4c, 255, 176, 92, 0.07 + 0.04 * Math.sin(T * 1.4), bf, ww, hh);
+    addSoftDot(ox, oy - yp2 * k3 - shift, 2.2 * k3, 255, 196, 110, 0.16 + 0.10 * Math.sin(T * 1.9), bf, ww, hh);
   }
 
   // 2.5 绕爱心旋转的粉色光点
@@ -430,9 +534,9 @@ function frame(now) {
     zp = ory * sp + camD;
     if (zp < 0.3) continue;
     k2 = F0 / zp;
-    sx = ox + orx * k2; sy = oy - yp * k2;
+    sx = ox + orx * k2; sy = oy - yp * k2 - shift;
     var otw = 0.5 + 0.5 * Math.sin(T * 2.3 + orbP[i]);
-    addSoftDot(sx, sy, 2.0 + 1.5 * otw, 255, 198, 226, 0.22 + 0.52 * otw, bf, ww, hh);
+    addSoftDot(sx, sy, 2.0 + 1.5 * otw, 255, 224, 150, 0.22 + 0.52 * otw, bf, ww, hh);
   }
 
   // 3. 金色余烬
@@ -447,7 +551,7 @@ function frame(now) {
     zp = emY[i] * sp + zz * cp + camD;
     if (zp < 0.2) continue;
     k2 = F0 / zp;
-    sx = ox + xz * k2; sy = oy - yp * k2;
+    sx = ox + xz * k2; sy = oy - yp * k2 - shift;
     if (sx < -30 || sx > ww + 30 || sy < -30 || sy > hh + 30) continue;
     addSoftDot(sx, sy, emS[i] * (0.55 + 0.9 * (1 - life)) * (13 / zp),
                255, 208, 96, Math.min(1, life) * 0.8, bf, ww, hh);
@@ -471,7 +575,7 @@ function frame(now) {
     zp = spkY[i] * sp + zz * cp + camD;
     if (zp < 0.5) continue;
     k2 = F0 / zp;
-    sx = ox + xz * k2; sy = oy - yp * k2;
+    sx = ox + xz * k2; sy = oy - yp * k2 - shift;
     if (sx < -20 || sx > ww + 20 || sy < -20 || sy > hh + 20) continue;
     var sww = 0.5 + 0.5 * Math.sin(T * spkV[i] + spkP[i]);
     var aal2 = 0.12 + 0.62 * sww * sww;
@@ -491,7 +595,7 @@ function frame(now) {
   var zpB = -0.25 * sp + camD;
   if (zpB > 0.5) {
     var k2b = F0 / zpB;
-    var bcx = ox, bcy = oy - ypB * k2b;
+    var bcx = ox, bcy = oy - ypB * k2b - shift;
     var rxB = 6.9 * k2b, ryB = rxB * 0.30;
     var aB, alB, goldB, flow;
     for (aB = 0; aB < TAU; aB += TAU / 84) {
@@ -526,6 +630,127 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
+// ══════════════════════════════════════════════════════════════
+//  手势识别（MediaPipe Tasks Vision / HandLandmarker, GPU）
+//  · 捏合(pinch)      → FOCUS   推近聚焦树顶爱心
+//  · 握拳(fist)       → TREE    恢复圣诞树
+//  · 张开(open hand)  → SCATTER 粒子散开成球
+//  · 手掌中心(9号点) 左右/上下 → 带动整棵树旋转
+//  慢加载：不点按钮不下载模型、不开摄像头，页面初始速度完全不变
+// ══════════════════════════════════════════════════════════════
+var VISION_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/+esm';
+var WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm';
+var MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+
+var handLandmarker = null, camVideo = null, camStream = null;
+var lastDetect = 0, lastGestureAt = -99, camBusy = false;
+
+function setStat(txt) {
+  try { var el = document.getElementById('stat'); if (el) el.textContent = txt; } catch (e) {}
+}
+function setMode(m, from) {
+  if (GS.mode === m) return;
+  GS.mode = m;
+  var names = { TREE: '圣诞树', SCATTER: '散落', FOCUS: '聚焦爱心' };
+  setStat('手势：' + (from ? from + ' · ' : '') + (names[m] || m));
+}
+
+// 按规格：食指(8)/中指(12)/无名指(16)/小指(20) 到手腕(0) 的平均距离，
+// 以及拇指(4)与食指(8)的间距来判断手势
+function classifyHand(lm) {
+  var w = lm[0];
+  function d(p) { var dx = p.x - w.x, dy = p.y - w.y; return Math.sqrt(dx * dx + dy * dy); }
+  var pinch = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y);
+  var avg = (d(lm[8]) + d(lm[12]) + d(lm[16]) + d(lm[20])) / 4;
+  if (pinch < 0.055) return 'pinch';
+  if (avg < 0.25) return 'fist';
+  if (avg > 0.40) return 'open';
+  return 'none';
+}
+
+function onLandmarks(lm) {
+  GS.active = true;
+  GS.lastSeen = T;
+  var c = lm[9] || lm[0];
+  GS.tx = c.x;
+  GS.ty = c.y;
+  var g = classifyHand(lm);
+  if (g !== 'none' && g !== GS.gesture && (T - lastGestureAt) > 0.55) {
+    lastGestureAt = T;
+    GS.gesture = g;
+    if (g === 'pinch') setMode('FOCUS', '捏合');
+    else if (g === 'fist') setMode('TREE', '握拳');
+    else if (g === 'open') setMode('SCATTER', '张开');
+  }
+  if (g === 'none') GS.gesture = 'none';
+}
+
+function detectLoop() {
+  requestAnimationFrame(detectLoop);
+  if (!handLandmarker || !camVideo || camVideo.readyState < 2) return;
+  var now = performance.now();
+  if (now - lastDetect < 55) return;          // ≈18fps 推理，够用又省电
+  lastDetect = now;
+  try {
+    var res = handLandmarker.detectForVideo(camVideo, now);
+    if (res && res.landmarks && res.landmarks.length) onLandmarks(res.landmarks[0]);
+    else GS.active = false;
+  } catch (e) { /* 单帧失败忽略 */ }
+}
+
+async function startHands() {
+  if (camBusy || handLandmarker) return;
+  camBusy = true;
+  setStat('手势：加载模型…');
+  try {
+    var mod = await import(VISION_URL);
+    var fileset = await mod.FilesetResolver.forVisionTasks(WASM_URL);
+    handLandmarker = await mod.HandLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
+      runningMode: 'VIDEO',
+      numHands: 1
+    });
+    setStat('手势：请允许摄像头…');
+    camVideo = document.getElementById('cam');
+    camStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480, facingMode: 'user' }, audio: false
+    });
+    camVideo.srcObject = camStream;
+    await camVideo.play();
+    GS.ready = true;
+    setStat('手势：已就绪 · 把手举到镜头前');
+    detectLoop();
+  } catch (e) {
+    camBusy = false;
+    var msg = (e && e.message) ? String(e.message) : '未知错误';
+    setStat('手势：启用失败（' + msg.slice(0, 42) + '）');
+  }
+}
+
+function initUI() {
+  try {
+    var btn = document.getElementById('camBtn');
+    var ui = document.getElementById('ui');
+    if (btn) {
+      btn.addEventListener('click', function () {
+        if (GS.ready) { setStat('手势：已启用'); return; }
+        btn.textContent = '正在启用…';
+        startHands().then(function () {
+          btn.textContent = GS.ready ? '手势已启用' : '重试启用摄像头';
+        });
+      });
+    }
+    document.addEventListener('keydown', function (e) {
+      var k = e.key;
+      if (k === 'h' || k === 'H') { if (ui) ui.classList.toggle('ui-hidden'); }
+      else if (k === '1' || k === '2' || k === '3') {
+        setMode(k === '1' ? 'TREE' : (k === '2' ? 'SCATTER' : 'FOCUS'), '按键');
+      }
+    });
+  } catch (e) { /* 无 UI 环境（测试）时忽略 */ }
+}
+
+initUI();
 resize();
 initSnow();
 initEmbers();
