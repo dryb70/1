@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>to 张姐 🎄</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh;touch-action:none}
+  .veil{position:fixed;inset:0;pointer-events:none;
+        background:radial-gradient(circle at 50% 52%, rgba(0,0,0,0) 36%, rgba(0,0,0,.26) 72%, rgba(0,0,0,.55) 100%)}
+  .txt{position:fixed;left:7vw;top:31%;pointer-events:none;
+       font-family:"STXingkai","华文行楷","STKaiti","KaiTi","楷体","Songti SC",Georgia,serif;
+       text-shadow:0 0 26px rgba(255,214,102,.55),0 0 66px rgba(70,255,140,.30),0 0 4px rgba(255,255,255,.4)}
+  .txt h1{margin:0;font-weight:400;font-size:clamp(36px,5vw,76px);line-height:1.12;
+          color:#fff5c8;letter-spacing:.03em}
+  .txt p{margin:.55em 0 0;font-size:clamp(12px,1.42vw,21px);letter-spacing:.26em;color:#bdffd2;
+         opacity:.78;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+  .hint{position:fixed;left:7vw;bottom:7vh;pointer-events:none;color:#eaffd8;opacity:0;
+        font:400 13px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:.12em;
+        animation:hint 7s ease-in-out forwards}
+  @keyframes hint{10%{opacity:.42}70%{opacity:.42}100%{opacity:0}}
+  @media (max-width:560px){.txt{top:23%}.hint{bottom:5vh}}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="veil"></div>
+<div class="txt"><h1>to 张姐</h1><p>MERRY CHRISTMAS</p></div>
+<div class="hint">拖动旋转 · 双击撒花</div>
+<script>
+(function () {
+'use strict';
+var TAU = Math.PI * 2;
+// 相机参数，与 tree.py 一致
+var TREE_H = 12.0, PITCH = -0.25, CAM_DIST = 13.0, CAM_HEIGHT = 6.0;
+
+var cvs = document.getElementById('c');
+var ctx = cvs.getContext('2d', { alpha: false });
+var W = 0, H = 0, img = null, buf = null;
+
+var small = Math.min(screen.width, screen.height) < 700;
+var TREE_N   = small ? 29000 : 58000;
+var GROUND_N = small ? 2600  : 5000;
+var STAR_N   = small ? 900   : 1700;
+var HEART_N  = small ? 800   : 1500;
+var WING_N   = small ? 6400  : 14000;
+var EMB_N    = small ? 44    : 92;
+var SNOW_N   = small ? 13    : 24;
+var SPK_N    = small ? 8     : 15;
+
+var xs, ys, zs, cr, cg, cb, ph, twk, fac, gl, N;
+var wingStart = 0, wingEnd = 0;    // 光帘不跟随旋转，始终在树左右两侧
+var heartStart = 0, heartEnd = 0;  // 树顶爱心始终面向镜头
+var TW_A = new Float32Array(256), TW_B = new Float32Array(256);
+var spkX = new Float32Array(SPK_N), spkY = new Float32Array(SPK_N), spkZ = new Float32Array(SPK_N),
+    spkP = new Float32Array(SPK_N), spkV = new Float32Array(SPK_N);
+// 绕爱心的光点
+var ORB_N = small ? 9 : 16;
+var orbA = new Float32Array(ORB_N), orbS = new Float32Array(ORB_N),
+    orbR = new Float32Array(ORB_N), orbP = new Float32Array(ORB_N);
+
+function rand(a, b) { return a + Math.random() * (b - a); }
+function randInt(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
+function clamp255(v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
+function gauss(mu, sd) {
+  var u = 0, v = 0;
+  while (!u) u = Math.random();
+  while (!v) v = Math.random();
+  return mu + sd * Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v);
+}
+
+function build() {
+  var X = [], Y = [], Z = [], R = [], G = [], B = [], P = [], K = [], F = [], L = [];
+  var glowLeft = small ? 700 : 1800;
+  var i, u, h, y, baseR, wave, t, ang, r, gm;
+
+  function add(x, y, z, rr, gg, bb, f, wantGlow) {
+    X.push(x); Y.push(y); Z.push(z);
+    R.push(clamp255(rr | 0)); G.push(clamp255(gg | 0)); B.push(clamp255(bb | 0));
+    P.push(randInt(0, 255));
+    K.push(Math.random() < 0.5 ? 0 : 1);
+    F.push(f === undefined ? 100 : f);
+    if (wantGlow && glowLeft > 0) { L.push(1); glowLeft--; } else L.push(0);
+  }
+
+  // 螺旋灯带：双股，翠绿底 + 金色灯泡
+  var spiral = Math.floor(TREE_N * 0.62);
+  for (i = 0; i < spiral; i++) {
+    u = Math.random();
+    h = Math.pow(u, 1.55);
+    y = TREE_H * h + 0.2;
+    baseR = Math.pow(1 - h, 1.1) * 3.1;
+    wave = Math.max(0, Math.sin((h * 6.2 + 0.15) * TAU));
+    baseR *= 1 + 0.70 * wave;
+    t = u * 10 * TAU;
+    ang = t + ((i & 1) ? Math.PI : 0) + rand(-0.16, 0.16);
+    r = baseR * rand(0.86, 1.07);
+    var sx0 = Math.cos(ang) * r, sz0 = Math.sin(ang) * r;
+    if (Math.random() < 0.15) {
+      add(sx0, y, sz0, 255, randInt(198, 238), randInt(64, 116), randInt(124, 156), true);
+    } else {
+      gm = Math.min(255, 176 + Math.floor(66 * (1 - Math.abs(h - 0.55) * 1.3)));
+      add(sx0, y, sz0, randInt(18, 78), gm, randInt(48, 112), randInt(95, 128), false);
+    }
+  }
+
+  // 随机填充：内部压深，外缘带金
+  for (i = 0; i < TREE_N - spiral; i++) {
+    h = Math.pow(Math.random(), 1.95);
+    y = TREE_H * h + 0.2 + rand(-0.1, 0.1);
+    baseR = Math.pow(1 - h, 1.1) * 3.75;
+    wave = Math.max(0, Math.sin((h * 6.2 + 0.15) * TAU));
+    baseR *= 1 + 0.56 * wave;
+    r = baseR * Math.sqrt(Math.random());
+    ang = Math.random() * TAU;
+    var depth = r / (baseR < 0.01 ? 0.01 : baseR);
+    if (Math.random() < 0.05 || (depth > 0.84 && Math.random() < 0.30)) {
+      add(Math.cos(ang) * r, y, Math.sin(ang) * r, 255, randInt(204, 242), randInt(68, 132), 108, Math.random() < 0.2);
+    } else {
+      add(Math.cos(ang) * r + rand(-0.09, 0.09), y, Math.sin(ang) * r + rand(-0.09, 0.09),
+          randInt(3, 40), clamp255(Math.floor(92 + 130 * depth)), clamp255(Math.floor(24 + 60 * depth)),
+          randInt(84, 110), false);
+    }
+  }
+
+  // 地面光环：绿金交替
+  var rings = [4.6, 6.0, 7.4, 8.8, 10.2, 11.4];
+  for (i = 0; i < GROUND_N; i++) {
+    var idx = Math.floor(Math.random() * rings.length);
+    r = gauss(rings[idx], 0.32);
+    ang = Math.random() * TAU;
+    if (idx & 1) {
+      add(Math.cos(ang) * r, -0.25, Math.sin(ang) * r, 255, randInt(200, 240), randInt(92, 148), 110, Math.random() < 0.07);
+    } else {
+      add(Math.cos(ang) * r, -0.25, Math.sin(ang) * r, randInt(42, 112), randInt(226, 255), randInt(78, 138), 110, false);
+    }
+  }
+
+  // 空中星点
+  for (i = 0; i < STAR_N; i++) {
+    var px0 = rand(-20, 20), py0 = rand(2.5, 19), pz0 = rand(-20, 20);
+    if (Math.random() < 0.22) {
+      add(px0, py0, pz0, randInt(50, 130), randInt(222, 255), randInt(80, 150), randInt(78, 100), Math.random() < 0.07);
+    } else {
+      add(px0, py0, pz0, 255, randInt(228, 255), randInt(168, 222), randInt(72, 104), Math.random() < 0.09);
+    }
+  }
+
+  // 树顶 3D 爱心（粉色，始终面向镜头）
+  var hx, hy, f, topY = TREE_H + 0.05, dist, fq;
+  heartStart = X.length;
+  for (i = 0; i < HEART_N; i++) {
+    do {
+      hx = rand(-1.3, 1.3); hy = rand(-1.4, 1.4);
+      f = Math.pow(hx * hx + hy * hy - 1, 3) - hx * hx * hy * hy * hy;
+    } while (f > 0);
+    dist = Math.hypot(hx, hy);
+    fq = Math.max(0.35, 1.15 - 0.5 * dist);
+    add(hx * 1.02, topY + (hy + 1) * 0.6, rand(-0.34, 0.34),
+        255, clamp255(120 * fq + 72), clamp255(200 * fq + 62), randInt(108, 136), Math.random() < 0.012);
+  }
+
+  // 爱心周围的粉色星环 + 光尘
+  var HR_N = small ? 430 : 1000, ha, hr, hxx, hyy, hzz, pick;
+  for (i = 0; i < HR_N; i++) {
+    ha = Math.random() * TAU;
+    if (Math.random() < 0.62) hr = rand(1.55, 2.85) + gauss(0, 0.12);   // 星环
+    else hr = rand(0.9, 3.35);                                          // 光尘
+    hxx = Math.cos(ha) * hr;
+    hyy = topY + 0.62 + Math.sin(ha) * hr * 0.62 + rand(-0.14, 0.14);
+    hzz = gauss(0, 0.14);
+    pick = Math.random();
+    if (pick < 0.10) {                                                   // 少量金星点缀
+      add(hxx, hyy, hzz, 255, randInt(200, 240), randInt(96, 152), randInt(84, 106), Math.random() < 0.05);
+    } else if (pick < 0.46) {                                            // 白
+      add(hxx, hyy, hzz, 255, randInt(226, 252), randInt(238, 255), randInt(80, 102), Math.random() < 0.03);
+    } else {                                                             // 粉
+      add(hxx, hyy, hzz, 255, randInt(146, 200), randInt(188, 232), randInt(82, 108), Math.random() < 0.045);
+    }
+  }
+
+  // 绕着爱心转的光点参数
+  for (i = 0; i < ORB_N; i++) {
+    orbA[i] = rand(0, TAU);
+    orbS[i] = rand(0.25, 0.62) * (Math.random() < 0.5 ? 1 : -1);
+    orbR[i] = rand(2.3, 3.7);
+    orbP[i] = rand(0, TAU);
+  }
+  heartEnd = X.length;
+
+  // 两侧光帘：树左右各一片竖向帘幕，底部绿、顶部金
+  // 竖屏手机两边没有空间，光帘会跑到屏幕外，就不生成（改为更密的树身）
+  var wingN = (W / H >= 1.05) ? WING_N : 0;
+  wingStart = X.length;
+  for (i = 0; i < wingN; i++) {
+    var side = (i & 1) ? 1 : -1;
+    u = Math.random();
+    var yy = 0.4 + Math.pow(u, 1.12) * 13.8;
+    var wv = Math.sin(u * TAU * 1.6 + side * 1.15);
+    // 半径随高度收窄，抵消透视放大，屏幕上是两根近乎竖直的光帘
+    var xw = side * (8.8 - 3.1 * u + 1.5 * wv) + gauss(0, 0.5);
+    var zw = gauss(0, 1.15);
+    var hi = u;
+    if (Math.random() < 0.28 + 0.34 * hi) {
+      add(xw, yy, zw, 255, randInt(200, 246), randInt(76, 150), randInt(62, 80), Math.random() < 0.045);
+    } else {
+      add(xw, yy, zw, randInt(18, 90), clamp255(Math.floor(176 + 70 * hi)), randInt(66, 138), randInt(60, 78), false);
+    }
+  }
+  wingEnd = X.length;
+
+  // 高空十字星芒
+  for (i = 0; i < SPK_N; i++) {
+    var sa0 = Math.random() * TAU, sr0 = rand(9.5, 17.5);
+    spkX[i] = Math.cos(sa0) * sr0;
+    spkY[i] = rand(7.0, 18.0);
+    spkZ[i] = Math.sin(sa0) * sr0;
+    spkP[i] = rand(0, TAU);
+    spkV[i] = rand(0.6, 1.5);
+  }
+
+  N = X.length;
+  xs = Float32Array.from(X); ys = Float32Array.from(Y); zs = Float32Array.from(Z);
+  cr = Uint8Array.from(R); cg = Uint8Array.from(G); cb = Uint8Array.from(B);
+  ph = Uint8Array.from(P); twk = Uint8Array.from(K); fac = Uint8Array.from(F); gl = Uint8Array.from(L);
+}
+
+// 闪烁查表：256 项，避免逐粒子三角函数
+var T = 0, angle = 0, last = 0;
+function updateTwinkle(t) {
+  var i, a;
+  for (i = 0; i < 256; i++) {
+    a = i * TAU / 256;
+    TW_A[i] = 0.56 + 0.44 * (0.5 + 0.5 * Math.sin(a * 3 + t * 2.35));
+    TW_B[i] = 0.38 + 0.62 * (0.5 + 0.5 * Math.sin(a * 7 - t * 4.20));
+  }
+}
+
+// 加法混合柔光点（雪 / 余烬 / 流星 / 星芒 / 树顶光晕共用）
+function addSoftDot(cx, cy, rad, r, g, b, alpha, bf, ww, hh) {
+  if (rad < 0.6 || alpha <= 0.004) return;
+  var r2 = rad * rad, inv = 1 / r2;
+  var bx = (cx - rad) | 0, by = (cy - rad) | 0;
+  var xe = bx + (rad | 0) * 2, ye = by + (rad | 0) * 2;
+  if (bx < 0) bx = 0; if (by < 0) by = 0;
+  if (xe > ww) xe = ww; if (ye > hh) ye = hh;
+  if (bx >= xe || by >= ye) return;
+  var px, py, dx, dy, d2, t2, m, p2, row, id2, ar, ag, ab, nr, ng, nb;
+  for (py = by; py < ye; py++) {
+    row = py * ww;
+    dy = py - cy;
+    var dy2 = dy * dy;
+    for (px = bx; px < xe; px++) {
+      dx = px - cx;
+      d2 = dx * dx + dy2;
+      if (d2 > r2) continue;
+      t2 = 1 - d2 * inv;
+      t2 = t2 * t2 * t2;
+      m = t2 * alpha;
+      id2 = row + px;
+      p2 = bf[id2];
+      ar = (p2 & 255) + r * m;
+      ag = ((p2 >> 8) & 255) + g * m;
+      ab = ((p2 >> 16) & 255) + b * m;
+      nr = ar > 255 ? 255 : ar | 0;
+      ng = ag > 255 ? 255 : ag | 0;
+      nb = ab > 255 ? 255 : ab | 0;
+      bf[id2] = 0xff000000 | (nb << 16) | (ng << 8) | nr;
+    }
+  }
+}
+
+// 雪
+var snowX = new Float32Array(SNOW_N), snowY = new Float32Array(SNOW_N),
+    snowR = new Float32Array(SNOW_N), snowV = new Float32Array(SNOW_N),
+    snowP = new Float32Array(SNOW_N), snowS = new Float32Array(SNOW_N);
+function respawnSnow(i, initial) {
+  snowX[i] = rand(0, W);
+  snowY[i] = initial ? rand(-40, H) : rand(-140, -20);
+  snowR[i] = rand(10, 20);
+  snowV[i] = rand(34, 62);
+  snowP[i] = rand(0, TAU);
+  snowS[i] = rand(8, 20);
+}
+function initSnow() { for (var i = 0; i < SNOW_N; i++) respawnSnow(i, true); }
+
+// 金色余烬：沿树身上飘
+var emX = new Float32Array(EMB_N), emY = new Float32Array(EMB_N), emZ = new Float32Array(EMB_N),
+    emV = new Float32Array(EMB_N), emL = new Float32Array(EMB_N), emM = new Float32Array(EMB_N),
+    emS = new Float32Array(EMB_N);
+function respawnEmber(i) {
+  var h = Math.pow(Math.random(), 1.15);
+  var br = Math.pow(1 - h, 1.1) * 4.0 + rand(0, 0.6);
+  var a = Math.random() * TAU;
+  emX[i] = Math.cos(a) * br; emY[i] = 0.4 + TREE_H * h; emZ[i] = Math.sin(a) * br;
+  emV[i] = rand(0.45, 1.7);
+  emM[i] = rand(1.8, 4.4); emL[i] = emM[i] * rand(0.2, 1);
+  emS[i] = rand(1.7, 3.4);
+}
+function initEmbers() { for (var i = 0; i < EMB_N; i++) respawnEmber(i); }
+
+// 流星
+var shots = [];
+function spawnShot() {
+  var dir = Math.random() < 0.5 ? 1 : -1;
+  shots.push({
+    x: dir > 0 ? rand(-40, W * 0.45) : rand(W * 0.55, W + 40),
+    y: rand(-20, H * 0.42),
+    vx: dir * rand(320, 560), vy: rand(90, 190),
+    t: 0, life: rand(0.65, 1.15)
+  });
+}
+
+function resize() {
+  W = cvs.width = Math.max(1, cvs.clientWidth | 0);
+  H = cvs.height = Math.max(1, cvs.clientHeight | 0);
+  img = ctx.createImageData(W, H);
+  buf = new Uint32Array(img.data.buffer);
+}
+window.addEventListener('resize', function () { resize(); initSnow(); });
+
+// 拖动旋转
+var dragX = null;
+cvs.addEventListener('pointerdown', function (e) { dragX = e.clientX; cvs.setPointerCapture(e.pointerId); });
+cvs.addEventListener('pointermove', function (e) {
+  if (dragX === null) return;
+  angle += (e.clientX - dragX) * 0.006;
+  dragX = e.clientX;
+});
+cvs.addEventListener('pointerup', function () { dragX = null; });
+cvs.addEventListener('pointercancel', function () { dragX = null; });
+cvs.addEventListener('dblclick', function () { spawnShot(); spawnShot(); spawnShot(); });
+
+function frame(now) {
+  // 局部变量：避免闭包 / 全局查找拖慢热循环
+  var bf = buf, ww = W, hh = H, NN = N;
+  var X = xs, Y = ys, Z = zs, CR = cr, CG = cg, CB = cb, PH = ph, TWK = twk, FAC = fac, GL = gl;
+  var wi0 = wingStart, hi0 = heartStart, hi1 = heartEnd;
+  var ta = TW_A, tb = TW_B;
+
+  var dt = last ? Math.min(0.05, (now - last) / 1000) : 0.016;
+  last = now;
+  T += dt;
+  angle += 0.26 * dt;
+  updateTwinkle(T);
+
+  var ca = Math.cos(angle), sa = Math.sin(angle);
+  var pitch = PITCH + Math.sin(T * 0.45) * 0.028;
+  var cp = Math.cos(pitch), sp = Math.sin(pitch);
+  var aspect = ww / hh;
+  var fit = aspect < 1.05 ? 1 + (1.05 - aspect) * 0.52 : 1;   // 竖屏拉远，避免出框
+  var camD = CAM_DIST * fit;
+  var F0 = hh * 0.63;
+  var ox = ww * 0.5, oy = hh * 0.5;
+  var i, x, y, z, xz, zz, yp, zp, sx, sy, size, bx, by, xe, ye, px, py, row, id2, p2;
+  var nr, ng2, nb, ci, cj, ck, k2, tw, f2, sz2;
+
+  bf.fill(0xff000000);
+
+  // 0. 树身后的绿金光雾，让黑色背景有层次
+  addSoftDot(ox, oy + hh * 0.04, hh * 0.26, 22, 86, 40, 0.085, bf, ww, hh);
+  addSoftDot(ox, oy - hh * 0.22, hh * 0.15, 46, 72, 26, 0.07, bf, ww, hh);
+
+  // 1. 主体粒子：最大混合 + 闪烁；金色灯泡额外柔光
+  for (i = 0; i < NN; i++) {
+    x = X[i]; y = Y[i]; z = Z[i];
+    if (i >= wi0 || (i >= hi0 && i < hi1)) {   // 光帘 + 爱心：固定在相机平面
+      xz = x; zz = z;
+    } else {
+      xz = x * ca - z * sa;
+      zz = x * sa + z * ca;
+    }
+    yp = y * cp - zz * sp - CAM_HEIGHT;
+    zp = y * sp + zz * cp + camD;
+    if (zp < 0.1) continue;
+    k2 = F0 / zp;
+    sx = (ox + xz * k2) | 0;
+    sy = (oy - yp * k2) | 0;
+    if (sx < 0 || sx >= ww || sy < 0 || sy >= hh) continue;
+
+    tw = TWK[i] ? tb[PH[i]] : ta[PH[i]];
+    ci = (CR[i] * tw) | 0; cj = (CG[i] * tw) | 0; ck = (CB[i] * tw) | 0;
+
+    f2 = FAC[i] * 0.01;
+    sz2 = (2.7 - zp * 0.095) * f2;
+    size = sz2 < 1 ? 1 : (sz2 | 0);
+
+    if (GL[i]) {
+      addSoftDot(sx, sy, size + 2.6, ci, cj, ck, 0.55 + 0.45 * tw, bf, ww, hh);
+      continue;
+    }
+
+    bx = sx - size; by = sy - size; xe = bx + size + size; ye = by + size + size;
+    if (bx < 0) bx = 0; if (by < 0) by = 0;
+    if (xe > ww) xe = ww; if (ye > hh) ye = hh;
+    for (py = by; py < ye; py++) {
+      row = py * ww;
+      for (px = bx; px < xe; px++) {
+        id2 = row + px;
+        p2 = bf[id2];
+        nr = p2 & 255; if (ci > nr) nr = ci;
+        ng2 = (p2 >> 8) & 255; if (cj > ng2) ng2 = cj;
+        nb = (p2 >> 16) & 255; if (ck > nb) nb = ck;
+        bf[id2] = 0xff000000 | (nb << 16) | (ng2 << 8) | nr;
+      }
+    }
+  }
+
+  // 2. 树顶爱心光晕（粉色）
+  var hyc = TREE_H + 0.67;
+  var hy0 = TREE_H + 0.92;
+  var yp2 = hy0 * cp - CAM_HEIGHT;
+  var zp2 = hy0 * sp + camD;
+  if (zp2 > 0.2) {
+    var k3 = F0 / zp2;
+    var k4c = F0 / (hyc * sp + camD > 0.2 ? hyc * sp + camD : 0.2);
+    var pyc = oy - (hyc * cp - CAM_HEIGHT) * k4c;
+    addSoftDot(ox, pyc, 3.8 * k4c, 255, 118, 186, 0.07 + 0.04 * Math.sin(T * 1.4), bf, ww, hh);
+    addSoftDot(ox, oy - yp2 * k3, 2.2 * k3, 255, 150, 208, 0.16 + 0.10 * Math.sin(T * 1.9), bf, ww, hh);
+  }
+
+  // 2.5 绕爱心旋转的粉色光点
+  for (i = 0; i < ORB_N; i++) {
+    var oa = orbA[i] + T * orbS[i];
+    var orx = Math.cos(oa) * orbR[i];
+    var ory = hyc + Math.sin(oa) * orbR[i] * 0.62;
+    yp = ory * cp - CAM_HEIGHT;
+    zp = ory * sp + camD;
+    if (zp < 0.3) continue;
+    k2 = F0 / zp;
+    sx = ox + orx * k2; sy = oy - yp * k2;
+    var otw = 0.5 + 0.5 * Math.sin(T * 2.3 + orbP[i]);
+    addSoftDot(sx, sy, 2.0 + 1.5 * otw, 255, 198, 226, 0.22 + 0.52 * otw, bf, ww, hh);
+  }
+
+  // 3. 金色余烬
+  for (i = 0; i < EMB_N; i++) {
+    emY[i] += emV[i] * dt;
+    emL[i] -= dt;
+    var life = emL[i] / emM[i];
+    if (life <= 0 || emY[i] > TREE_H + 7) { respawnEmber(i); life = 0.3; }
+    xz = emX[i] * ca - emZ[i] * sa;
+    zz = emX[i] * sa + emZ[i] * ca;
+    yp = emY[i] * cp - zz * sp - CAM_HEIGHT;
+    zp = emY[i] * sp + zz * cp + camD;
+    if (zp < 0.2) continue;
+    k2 = F0 / zp;
+    sx = ox + xz * k2; sy = oy - yp * k2;
+    if (sx < -30 || sx > ww + 30 || sy < -30 || sy > hh + 30) continue;
+    addSoftDot(sx, sy, emS[i] * (0.55 + 0.9 * (1 - life)) * (13 / zp),
+               255, 208, 96, Math.min(1, life) * 0.8, bf, ww, hh);
+  }
+
+  // 4. 前景雪花
+  for (i = 0; i < SNOW_N; i++) {
+    snowY[i] += snowV[i] * dt;
+    if (snowY[i] > hh + 40) respawnSnow(i, false);
+    var swx = snowX[i] + Math.sin(T * 0.8 + snowP[i]) * snowS[i];
+    var fade = snowY[i] > hh * 0.72 ? (1 - (snowY[i] - hh * 0.72) / (hh * 0.28)) : 1;
+    if (fade < 0) fade = 0;
+    addSoftDot(swx, snowY[i], snowR[i], 255, 255, 255, 0.5 * fade, bf, ww, hh);
+  }
+
+  // 5. 十字星芒
+  for (i = 0; i < SPK_N; i++) {
+    xz = spkX[i] * ca - spkZ[i] * sa;
+    zz = spkX[i] * sa + spkZ[i] * ca;
+    yp = spkY[i] * cp - zz * sp - CAM_HEIGHT;
+    zp = spkY[i] * sp + zz * cp + camD;
+    if (zp < 0.5) continue;
+    k2 = F0 / zp;
+    sx = ox + xz * k2; sy = oy - yp * k2;
+    if (sx < -20 || sx > ww + 20 || sy < -20 || sy > hh + 20) continue;
+    var sww = 0.5 + 0.5 * Math.sin(T * spkV[i] + spkP[i]);
+    var aal2 = 0.12 + 0.62 * sww * sww;
+    var ln = (5.5 + 5.5 * sww) * (13 / zp);
+    for (var kk = 0; kk < 6; kk++) {
+      var dd = kk * ln * 0.34;
+      var af2 = aal2 * (1 - kk / 6);
+      addSoftDot(sx + dd, sy, 1.5, 255, 244, 186, af2, bf, ww, hh);
+      addSoftDot(sx - dd, sy, 1.5, 255, 244, 186, af2, bf, ww, hh);
+      addSoftDot(sx, sy + dd, 1.5, 255, 244, 186, af2, bf, ww, hh);
+      addSoftDot(sx, sy - dd, 1.5, 255, 244, 186, af2, bf, ww, hh);
+    }
+  }
+
+  // 6. 地面光环：贴着树根流动的椭圆光晕
+  var ypB = -0.25 * cp - CAM_HEIGHT;
+  var zpB = -0.25 * sp + camD;
+  if (zpB > 0.5) {
+    var k2b = F0 / zpB;
+    var bcx = ox, bcy = oy - ypB * k2b;
+    var rxB = 6.9 * k2b, ryB = rxB * 0.30;
+    var aB, alB, goldB, flow;
+    for (aB = 0; aB < TAU; aB += TAU / 84) {
+      flow = 0.5 + 0.5 * Math.sin(aB * 3 - T * 2.1);
+      alB = 0.10 + 0.20 * flow;
+      goldB = ((aB * 3.1) | 0) & 1;
+      addSoftDot(bcx + Math.cos(aB) * rxB, bcy + Math.sin(aB) * ryB, 1.7 + 1.2 * flow,
+                 goldB ? 255 : 90, goldB ? 208 : 255, goldB ? 96 : 150, alB, bf, ww, hh);
+      alB *= 0.55;
+      addSoftDot(bcx + Math.cos(aB) * rxB * 0.76, bcy + Math.sin(aB) * ryB * 0.76, 1.4 + 0.9 * flow,
+                 goldB ? 255 : 80, goldB ? 214 : 255, goldB ? 110 : 150, alB, bf, ww, hh);
+    }
+  }
+
+  // 7. 流星
+  if (Math.random() < dt * 0.3) spawnShot();
+  for (i = shots.length - 1; i >= 0; i--) {
+    var s = shots[i];
+    s.t += dt; s.x += s.vx * dt; s.y += s.vy * dt;
+    if (s.t > s.life || s.x < -140 || s.x > ww + 140 || s.y > hh + 140) { shots.splice(i, 1); continue; }
+    var k4, ppx, ppy, rrad, aal, fadeL = 1 - s.t / s.life;
+    for (k4 = 0; k4 < 15; k4++) {
+      ppx = s.x - s.vx * 0.011 * k4;
+      ppy = s.y - s.vy * 0.011 * k4;
+      rrad = 2.4 - k4 * 0.11;
+      aal = (1 - k4 / 15) * fadeL * 0.8;
+      addSoftDot(ppx, ppy, rrad < 0.7 ? 0.7 : rrad, 255, 236, 150, aal, bf, ww, hh);
+    }
+  }
+
+  ctx.putImageData(img, 0, 0);
+  requestAnimationFrame(frame);
+}
+
+resize();
+initSnow();
+initEmbers();
+build();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
